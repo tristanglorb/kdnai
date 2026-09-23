@@ -8,9 +8,7 @@ const artifactsBtn = document.querySelector('#artifacts-btn');
 const scheduledBtn = document.querySelector('#scheduled-btn');
 const customizeBtn = document.querySelector('#customize-btn');
 const moreBtn = document.querySelector('#more-btn');
-const chatItems = document.querySelectorAll('.chat');
 
-/* other sidebar controls (picked from your existing HTML, no ids needed) */
 const sidebar = document.querySelector('.sidebar');
 const newProjectPlus = document.querySelector('.section-header span:last-child');
 const pinHint = document.querySelector('.subtext');
@@ -24,6 +22,8 @@ const [downloadIcon, searchIcon, collapseIcon] = document.querySelectorAll('.men
 /* ===================== names & saved state ===================== */
 
 const ASSISTANT_NAME = 'Kayden';
+const DEFAULT_MODEL = 'gpt-5.6-luna';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 const DAY = 864e5;
 
 const store = {
@@ -51,15 +51,29 @@ let mode = 'chat';
 let artifactTab = 'mine';
 let searchHandler = null;
 let chatSort = 'recent';
+let currentChatId = null;
+let activeRequest = null;        /* { controller } while a reply is streaming */
 
 let userName = store.get('userName', 'Kdn');
+let apiKey = store.get('apiKey', '');
 
-let settings = store.get('settings', {
+let settings = Object.assign({
     style: 'Normal',
     instructions: '',
     memory: true,
-    suggestions: true
-});
+    suggestions: true,
+    model: DEFAULT_MODEL
+}, store.get('settings', {}));
+
+let chats = store.get('chats', []);
+
+/* a reply that was still streaming when the page closed can't finish now */
+chats.forEach(chat => chat.messages.forEach(message => {
+    if (message.pending) {
+        delete message.pending;
+        if (!message.content) message.stopped = true;
+    }
+}));
 
 let projects = store.get('projects', [
     { name: 'Bounce Dodge',    desc: 'Arcade game where you dodge bouncing balls', updated: Date.now() - 1 * DAY,  pinned: false },
@@ -89,12 +103,20 @@ const artifacts = [
 
 const DESIGN_ICONS = { 'Poster': '🖼️', 'Web page': '🖥️', 'Graphic': '✏️' };
 
+const STYLE_HINTS = {
+    Normal: '',
+    Concise: 'Keep answers short and to the point.',
+    Explanatory: 'Explain things clearly and step by step, like a patient teacher.',
+    Formal: 'Use a formal, professional tone.'
+};
+
 function saveAll() {
     store.set('userName', userName);
     store.set('settings', settings);
     store.set('projects', projects);
     store.set('tasks', tasks);
     store.set('designs', designs);
+    store.set('chats', chats);
     refreshSidebar();
 }
 
@@ -136,8 +158,9 @@ function toast(message) {
 }
 
 function exportData() {
+    /* the API key is deliberately left out of the export */
     const blob = new Blob(
-        [JSON.stringify({ userName, settings, projects, tasks, designs }, null, 2)],
+        [JSON.stringify({ userName, settings, chats, projects, tasks, designs }, null, 2)],
         { type: 'application/json' }
     );
     const link = document.createElement('a');
@@ -149,19 +172,124 @@ function exportData() {
 }
 
 function resetAll() {
-    if (!confirm('Reset all saved projects, tasks, designs and settings?')) return;
+    if (!confirm('Reset all chats, projects, tasks, designs and settings? This also removes your saved API key.')) return;
     store.clear();
     location.reload();
 }
 
-function chatList() {
-    return Array.from(chatItems).map(el => ({
-        key: el.dataset.chat,
-        title: el.textContent.trim()
-    }));
+function makeTitle(text) {
+    const line = text.replace(/\s+/g, ' ').trim();
+    return line.length > 40 ? line.slice(0, 40) + '…' : line;
 }
 
-/* ===================== home screens ===================== */
+/* ===================== markdown for replies ===================== */
+
+function renderInline(text) {
+    return escapeHTML(text)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
+function renderMarkdown(md) {
+    const lines = md.split('\n');
+    const blocks = [];
+    let i = 0;
+
+    const isHeading = line => /^#{1,6} /.test(line);
+    const isBullet  = line => /^\s*[-*] /.test(line);
+    const isNumber  = line => /^\s*\d+[.)] /.test(line);
+    const isBreak   = line =>
+        line.trim() === '' || line.startsWith('```') || isHeading(line) || isBullet(line) || isNumber(line);
+
+    while (i < lines.length) {
+        const line = lines[i];
+
+        if (line.startsWith('```')) {
+            const buffer = [];
+            i++;
+            while (i < lines.length && !lines[i].startsWith('```')) {
+                buffer.push(lines[i]);
+                i++;
+            }
+            i++;
+            blocks.push(`<pre><code>${escapeHTML(buffer.join('\n'))}</code></pre>`);
+        }
+        else if (line.trim() === '') {
+            i++;
+        }
+        else if (isHeading(line)) {
+            const [, hashes, text] = line.match(/^(#{1,6}) (.*)$/);
+            const tag = hashes.length <= 2 ? 'h2' : 'h3';
+            blocks.push(`<${tag}>${renderInline(text)}</${tag}>`);
+            i++;
+        }
+        else if (isBullet(line)) {
+            const items = [];
+            while (i < lines.length && isBullet(lines[i])) {
+                items.push(`<li>${renderInline(lines[i].replace(/^\s*[-*] /, ''))}</li>`);
+                i++;
+            }
+            blocks.push(`<ul>${items.join('')}</ul>`);
+        }
+        else if (isNumber(line)) {
+            const items = [];
+            while (i < lines.length && isNumber(lines[i])) {
+                items.push(`<li>${renderInline(lines[i].replace(/^\s*\d+[.)] /, ''))}</li>`);
+                i++;
+            }
+            blocks.push(`<ol>${items.join('')}</ol>`);
+        }
+        else {
+            const buffer = [];
+            while (i < lines.length && !isBreak(lines[i])) {
+                buffer.push(renderInline(lines[i]));
+                i++;
+            }
+            blocks.push(`<p>${buffer.join('<br>')}</p>`);
+        }
+    }
+
+    return blocks.join('');
+}
+
+/* ===================== composer & home screens ===================== */
+
+const SEND_ICON = `
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="19" x2="12" y2="5"/>
+        <polyline points="5 12 12 5 19 12"/>
+    </svg>`;
+
+const STOP_ICON = `
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+        <rect x="5" y="5" width="14" height="14" rx="2"/>
+    </svg>`;
+
+const composerHTML = placeholder => `
+    <div class="input-card composer">
+        <textarea class="composer-input" id="composer-input" rows="1"
+                  placeholder="${escapeHTML(placeholder)}"></textarea>
+
+        <div class="input-controls">
+            <div class="left-controls">
+                <span class="add-icon">+</span>
+                <div class="mode-toggle">
+                    <button class="toggle-btn active">Chat</button>
+                    <button class="toggle-btn">Cowork</button>
+                </div>
+            </div>
+
+            <div class="right-controls">
+                <button class="model-btn" data-action="nav" data-view="customize" title="Change model">
+                    ${escapeHTML(settings.model)} ∨
+                </button>
+                <button class="send-btn" id="send-btn" aria-label="Send message" disabled>${SEND_ICON}</button>
+            </div>
+        </div>
+    </div>
+`;
 
 const chatHTML = () => `
     <div class="wrapper">
@@ -180,29 +308,7 @@ const chatHTML = () => `
             <p class="welcome-msg">${greetingWord()}, ${escapeHTML(userName)}</p>
         </div>
 
-        <div class="input-card">
-            <div class="input-placeholder">Type / for skills</div>
-
-            <div class="input-controls">
-                <div class="left-controls">
-                    <span class="add-icon">+</span>
-                    <div class="mode-toggle">
-                        <button class="toggle-btn active">Chat</button>
-                        <button class="toggle-btn">Cowork</button>
-                    </div>
-                </div>
-
-                <div class="right-controls">
-                    <span>Opus 5 High</span>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <rect x="8.78" y="2.42" width="6.44" height="11.43" rx="3.22"/>
-                        <path d="M19.06 9.51V10.79a7.06 7.06 0 0 1-14.12 0V9.51"/>
-                        <path d="M12 17.85V22.32"/>
-                    </svg>
-                    <span>∨</span>
-                </div>
-            </div>
-        </div>
+        ${composerHTML('How can I help you today?')}
     </div>
 `;
 
@@ -328,14 +434,21 @@ const codeHTML = () => `
 /* ===================== view switching ===================== */
 
 function resetMain() {
-    playToken++;                     /* stops any conversation that is playing */
+    if (activeRequest) activeRequest.controller.abort();   /* leaving stops a reply mid-stream */
     searchHandler = null;
+    currentChatId = null;
     mainContent.classList.remove('chat-mode', 'page-mode');
+}
+
+function focusComposer() {
+    const input = document.getElementById('composer-input');
+    if (input) input.focus();
 }
 
 function showHome() {
     resetMain();
     mainContent.innerHTML = mode === 'chat' ? chatHTML() : codeHTML();
+    focusComposer();
 }
 
 function showPage(html) {
@@ -395,8 +508,8 @@ const VIEWS = {
 function go(view) {
     const entry = NAV.find(([, name]) => name === view);
     setActiveNav(entry ? entry[0] : null);
-    chatItems.forEach(item => item.classList.remove('active'));
     VIEWS[view]();
+    renderChatList();
 }
 
 NAV.forEach(([btn, view]) => {
@@ -413,6 +526,41 @@ codeToggle.addEventListener('click', () => {
     go('home');
 });
 
+/* ===================== sidebar: chats list ===================== */
+
+const DOT_SVG = `
+    <svg width="6" height="6" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="10.7" fill="none" stroke="currentColor" stroke-width="2.7"/>
+    </svg>`;
+
+function renderChatList() {
+    const list = [...chats];
+
+    if (chatSort === 'az') list.sort((a, b) => a.title.localeCompare(b.title));
+    else list.sort((a, b) => b.updated - a.updated);
+
+    chatsBox.innerHTML = list.map(chat => `
+        <div class="chat ${chat.id === currentChatId ? 'active' : ''}" data-id="${chat.id}" title="${escapeHTML(chat.title)}">
+            ${DOT_SVG}
+            <span class="chat-title">${escapeHTML(chat.title)}</span>
+        </div>
+    `).join('');
+}
+
+chatsBox.addEventListener('click', event => {
+    const item = event.target.closest('.chat');
+    if (item) openChat(item.dataset.id);
+});
+
+allChatsIcon.addEventListener('click', () => go('chats'));
+
+sortChatsIcon.addEventListener('click', () => {
+    chatSort = chatSort === 'recent' ? 'az' : 'recent';
+    sortChatsIcon.classList.toggle('on', chatSort === 'az');
+    renderChatList();
+    toast(chatSort === 'az' ? 'Sorted A to Z' : 'Sorted by most recent');
+});
+
 /* ===================== sidebar: profile, pinned projects ===================== */
 
 function refreshSidebar() {
@@ -421,6 +569,7 @@ function refreshSidebar() {
         ${escapeHTML(userName)}
     `;
     renderPinned();
+    renderChatList();
 }
 
 function renderPinned() {
@@ -455,8 +604,8 @@ function renderPinned() {
 function openProjectFromSidebar(index) {
     if (mode !== 'chat') applyMode('chat');
     setActiveNav(null);
-    chatItems.forEach(item => item.classList.remove('active'));
     renderProjectDetail(index);
+    renderChatList();
 
     const item = document.querySelector(`#pinned-list [data-index="${index}"]`);
     if (item) item.classList.add('active');
@@ -477,24 +626,6 @@ newProjectPlus.addEventListener('click', () => {
     if (index !== null) openProjectFromSidebar(index);
 });
 
-/* ===================== sidebar: chats header icons ===================== */
-
-const originalChatOrder = Array.from(chatItems);
-
-allChatsIcon.addEventListener('click', () => go('chats'));
-
-sortChatsIcon.addEventListener('click', () => {
-    chatSort = chatSort === 'recent' ? 'az' : 'recent';
-
-    const ordered = chatSort === 'az'
-        ? [...originalChatOrder].sort((a, b) => a.textContent.trim().localeCompare(b.textContent.trim()))
-        : originalChatOrder;
-
-    ordered.forEach(item => chatsBox.appendChild(item));
-    sortChatsIcon.classList.toggle('on', chatSort === 'az');
-    toast(chatSort === 'az' ? 'Sorted A to Z' : 'Sorted by most recent');
-});
-
 /* ===================== sidebar: bottom icons ===================== */
 
 downloadIcon.addEventListener('click', exportData);
@@ -513,8 +644,6 @@ function setSidebar(open) {
 
 collapseIcon.addEventListener('click', () => setSidebar(false));
 openSidebarBtn.addEventListener('click', () => setSidebar(true));
-
-/* account menu (click the avatar / name) */
 
 function closeAccountMenu() {
     const menu = document.getElementById('account-menu');
@@ -557,6 +686,255 @@ userInfo.addEventListener('click', () => {
         else go(choice);
     });
 });
+
+/* ===================== chatting with OpenAI ===================== */
+
+function openChat(id) {
+    const chat = chats.find(c => c.id === id);
+    if (chat) openChatView(chat);
+}
+
+function openChatView(chat) {
+    resetMain();
+    applyMode('chat');
+    setActiveNav(null);
+    currentChatId = chat.id;
+
+    mainContent.classList.add('chat-mode');
+    mainContent.innerHTML = `
+        <div class="chat-view">
+            <div class="chat-topbar">
+                <span class="chat-topbar-title" id="chat-title">${escapeHTML(chat.title)}</span>
+                <div class="chat-topbar-actions">
+                    <button class="topbar-btn" data-action="rename-chat">Rename</button>
+                    <button class="topbar-btn danger" data-action="delete-chat">Delete</button>
+                </div>
+            </div>
+
+            <div class="transcript" id="transcript">
+                <div class="transcript-inner" id="transcript-inner"></div>
+            </div>
+
+            <div class="composer-area">
+                ${composerHTML(`Reply to ${ASSISTANT_NAME}...`)}
+                <div class="skip-hint">${ASSISTANT_NAME} can make mistakes. Check important info.</div>
+            </div>
+        </div>
+    `;
+
+    renderTranscript(chat);
+    renderChatList();
+    focusComposer();
+}
+
+function messageBodyHTML(message) {
+    if (message.error) {
+        return `
+            <div class="msg-error">${escapeHTML(message.content)}</div>
+            <button class="ghost-btn" data-action="nav" data-view="customize">Open Customize</button>
+        `;
+    }
+    if (message.content) {
+        return renderMarkdown(message.content) +
+            (message.stopped ? `<p class="msg-note">Stopped</p>` : '');
+    }
+    if (message.pending) {
+        return `<div class="thinking"><span></span><span></span><span></span></div>`;
+    }
+    return `<p class="msg-note">Stopped before replying.</p>`;
+}
+
+function renderTranscript(chat) {
+    const inner = document.getElementById('transcript-inner');
+    if (!inner) return;
+
+    inner.innerHTML = chat.messages.map(message => message.role === 'user'
+        ? `<div class="msg user"><div class="msg-body">${escapeHTML(message.content)}</div></div>`
+        : `<div class="msg assistant">
+               <div class="msg-head">
+                   <img src="assets/claude.png" alt="${ASSISTANT_NAME}" width="18" height="18">
+                   ${ASSISTANT_NAME}
+               </div>
+               <div class="msg-body">${messageBodyHTML(message)}</div>
+           </div>`
+    ).join('');
+
+    scrollTranscript();
+}
+
+function scrollTranscript() {
+    const transcript = document.getElementById('transcript');
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function autosize(input) {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+}
+
+function setSendState() {
+    const btn = document.getElementById('send-btn');
+    const input = document.getElementById('composer-input');
+    if (!btn) return;
+
+    const streaming = !!activeRequest;
+    btn.classList.toggle('stop', streaming);
+    btn.innerHTML = streaming ? STOP_ICON : SEND_ICON;
+    btn.setAttribute('aria-label', streaming ? 'Stop reply' : 'Send message');
+    btn.disabled = !streaming && !(input && input.value.trim());
+}
+
+function buildMessages(chat) {
+    const system = [
+        `You are ${ASSISTANT_NAME}, a friendly and helpful AI assistant.`,
+        `The user's name is ${userName}.`,
+        STYLE_HINTS[settings.style] || '',
+        settings.instructions.trim()
+            ? `Follow these instructions from the user: ${settings.instructions.trim()}`
+            : ''
+    ].filter(Boolean).join(' ');
+
+    return [
+        { role: 'system', content: system },
+        ...chat.messages
+            .filter(message => !message.error && message.content)
+            .map(message => ({ role: message.role, content: message.content }))
+    ];
+}
+
+async function describeError(response) {
+    let detail = '';
+    try {
+        const data = await response.json();
+        detail = (data && data.error && data.error.message) || '';
+    } catch {}
+
+    switch (response.status) {
+        case 401: return 'OpenAI rejected your API key (401). Check the key in Customize.';
+        case 403: return 'Your API key is not allowed to use this model (403). ' + detail;
+        case 404: return `The model "${settings.model}" was not found (404). Change the model in Customize.`;
+        case 429: return 'Rate limit reached or no credits left (429). Check your usage and billing on the OpenAI platform.';
+        default:  return `OpenAI error ${response.status}${detail ? ': ' + detail : ''}`;
+    }
+}
+
+async function sendMessage() {
+    const input = document.getElementById('composer-input');
+    if (!input || activeRequest) return;
+
+    const text = input.value.trim();
+    if (!text) return;
+
+    let chat = chats.find(c => c.id === currentChatId);
+    const isNewChat = !chat;
+
+    if (isNewChat) {
+        chat = { id: 'c' + Date.now(), title: makeTitle(text), messages: [], updated: Date.now() };
+        chats.unshift(chat);
+    }
+
+    chat.messages.push({ role: 'user', content: text });
+    const reply = { role: 'assistant', content: '', pending: true };
+    chat.messages.push(reply);
+    chat.updated = Date.now();
+    saveAll();
+
+    if (isNewChat) {
+        openChatView(chat);
+    } else {
+        input.value = '';
+        autosize(input);
+        renderTranscript(chat);
+        renderChatList();
+    }
+
+    const bodies = document.querySelectorAll('#transcript-inner .msg.assistant .msg-body');
+    await streamReply(chat, reply, bodies[bodies.length - 1]);
+}
+
+async function streamReply(chat, reply, body) {
+    const controller = new AbortController();
+    activeRequest = { controller };
+    setSendState();
+
+    try {
+        if (!apiKey) {
+            throw new Error(`Add your OpenAI API key in Customize to start chatting with ${ASSISTANT_NAME}.`);
+        }
+
+        const response = await fetch(OPENAI_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify({
+                model: settings.model,
+                stream: true,
+                messages: buildMessages(chat)
+            }),
+            signal: controller.signal
+        });
+
+        if (!response.ok) throw new Error(await describeError(response));
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith('data:')) continue;
+
+                const data = trimmed.slice(5).trim();
+                if (data === '[DONE]') continue;
+
+                try {
+                    const json = JSON.parse(data);
+                    const delta = json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content;
+                    if (delta) {
+                        reply.content += delta;
+                        if (body) body.innerHTML = renderMarkdown(reply.content) + '<span class="caret"></span>';
+                        scrollTranscript();
+                    }
+                } catch {
+                    /* ignore keep-alive or partial lines */
+                }
+            }
+        }
+    }
+    catch (error) {
+        if (error.name === 'AbortError') {
+            reply.stopped = true;
+        }
+        else if (error instanceof TypeError) {
+            reply.error = true;
+            reply.content = "Couldn't reach OpenAI. Check your internet connection and try again.";
+        }
+        else {
+            reply.error = true;
+            reply.content = error.message;
+        }
+    }
+    finally {
+        delete reply.pending;
+        activeRequest = null;
+        chat.updated = Date.now();
+        saveAll();
+
+        if (body) body.innerHTML = messageBodyHTML(reply);
+        setSendState();
+        scrollTranscript();
+    }
+}
 
 /* ===================== projects ===================== */
 
@@ -733,6 +1111,16 @@ function renderCustomize() {
             </div>
             <div class="form">
                 <div class="field">
+                    <label for="set-key">OpenAI API key</label>
+                    <span class="field-hint">Saved only in this browser. Never put your key in the code or push it to GitHub.</span>
+                    <input id="set-key" type="password" value="${escapeHTML(apiKey)}" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                </div>
+                <div class="field">
+                    <label for="set-model">Model</label>
+                    <span class="field-hint">The OpenAI model ${ASSISTANT_NAME} uses, for example ${DEFAULT_MODEL}.</span>
+                    <input id="set-model" value="${escapeHTML(settings.model)}" spellcheck="false">
+                </div>
+                <div class="field">
                     <label for="set-name">What should ${ASSISTANT_NAME} call you?</label>
                     <input id="set-name" value="${escapeHTML(userName)}" maxlength="30">
                 </div>
@@ -783,13 +1171,13 @@ function renderMore() {
                 <div class="row clickable" data-action="nav" data-view="customize">
                     <div class="row-main">
                         <span class="row-title">Settings</span>
-                        <span class="row-sub">Name, response style and instructions</span>
+                        <span class="row-sub">API key, model, name and instructions</span>
                     </div>
                 </div>
                 <div class="row clickable" data-action="export">
                     <div class="row-main">
                         <span class="row-title">Export data</span>
-                        <span class="row-sub">Download your projects, tasks and settings as JSON</span>
+                        <span class="row-sub">Download your chats, projects and settings as JSON</span>
                     </div>
                 </div>
                 <div class="row clickable" data-action="about">
@@ -801,7 +1189,7 @@ function renderMore() {
                 <div class="row clickable" data-action="reset">
                     <div class="row-main">
                         <span class="row-title danger">Reset everything</span>
-                        <span class="row-sub">Clear saved projects, tasks and settings</span>
+                        <span class="row-sub">Clear all chats, projects, tasks, settings and your API key</span>
                     </div>
                 </div>
             </div>
@@ -859,11 +1247,17 @@ function renderDesignDetail(index) {
 
 /* ===================== all chats & search ===================== */
 
+function chatMatches(chat, term) {
+    return chat.title.toLowerCase().includes(term) ||
+        chat.messages.some(message => message.content.toLowerCase().includes(term));
+}
+
 function chatRows(list) {
     return list.map(chat => `
-        <div class="row clickable" data-action="open-chat" data-chat="${escapeHTML(chat.key)}">
+        <div class="row clickable" data-action="open-chat" data-chat="${chat.id}">
             <div class="row-main">
                 <span class="row-title">${escapeHTML(chat.title)}</span>
+                <span class="row-sub">Updated ${timeAgo(chat.updated)}</span>
             </div>
         </div>
     `).join('');
@@ -888,8 +1282,15 @@ function fillChats(query) {
     const results = document.getElementById('results');
     if (!results) return;
 
+    if (!chats.length) {
+        results.innerHTML = `<div class="empty-state">No chats yet. Start one from New.</div>`;
+        return;
+    }
+
     const term = query.trim().toLowerCase();
-    const matches = chatList().filter(chat => !term || chat.title.toLowerCase().includes(term));
+    const matches = [...chats]
+        .sort((a, b) => b.updated - a.updated)
+        .filter(chat => !term || chatMatches(chat, term));
 
     results.innerHTML = matches.length
         ? `<div class="row-list">${chatRows(matches)}</div>`
@@ -920,24 +1321,24 @@ function fillSearch(query) {
         return;
     }
 
-    const chats = chatList().filter(chat => chat.title.toLowerCase().includes(term));
-    const found = projects
+    const foundChats = chats.filter(chat => chatMatches(chat, term));
+    const foundProjects = projects
         .map((project, index) => ({ project, index }))
         .filter(({ project }) => (project.name + ' ' + project.desc).toLowerCase().includes(term));
 
-    if (!chats.length && !found.length) {
+    if (!foundChats.length && !foundProjects.length) {
         results.innerHTML = `<div class="empty-state">Nothing matches "${escapeHTML(query)}".</div>`;
         return;
     }
 
     results.innerHTML = `
-        ${chats.length ? `
+        ${foundChats.length ? `
             <p class="results-label">Chats</p>
-            <div class="row-list">${chatRows(chats)}</div>` : ''}
-        ${found.length ? `
+            <div class="row-list">${chatRows(foundChats)}</div>` : ''}
+        ${foundProjects.length ? `
             <p class="results-label">Projects</p>
             <div class="row-list">
-                ${found.map(({ project, index }) => `
+                ${foundProjects.map(({ project, index }) => `
                     <div class="row clickable" data-action="open-project" data-index="${index}">
                         <div class="row-main">
                             <span class="row-title">${escapeHTML(project.name)}</span>
@@ -949,16 +1350,35 @@ function fillSearch(query) {
     `;
 }
 
-/* ===================== page actions (one delegated listener) ===================== */
+/* ===================== main area events (delegated) ===================== */
 
 mainContent.addEventListener('input', event => {
     if (event.target.id === 'page-search' && searchHandler) {
         searchHandler(event.target.value);
     }
+    if (event.target.id === 'composer-input') {
+        autosize(event.target);
+        setSendState();
+    }
+});
+
+mainContent.addEventListener('keydown', event => {
+    if (event.target.id !== 'composer-input') return;
+
+    /* Enter sends, Shift+Enter makes a new line */
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        sendMessage();
+    }
 });
 
 mainContent.addEventListener('click', event => {
-    /* Chat / Cowork toggle inside the composer (re-rendered, so delegated) */
+    if (event.target.closest('#send-btn')) {
+        if (activeRequest) activeRequest.controller.abort();
+        else sendMessage();
+        return;
+    }
+
     const toggleBtn = event.target.closest('.mode-toggle .toggle-btn');
     if (toggleBtn) {
         toggleBtn.parentElement.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
@@ -976,6 +1396,32 @@ mainContent.addEventListener('click', event => {
             go(el.dataset.view);
             break;
 
+        case 'open-chat':
+            openChat(el.dataset.chat);
+            break;
+
+        case 'rename-chat': {
+            const chat = chats.find(c => c.id === currentChatId);
+            if (!chat) return;
+            const title = prompt('Rename chat', chat.title);
+            if (!title || !title.trim()) return;
+            chat.title = title.trim();
+            saveAll();
+            document.getElementById('chat-title').textContent = chat.title;
+            toast('Chat renamed');
+            break;
+        }
+
+        case 'delete-chat': {
+            const chat = chats.find(c => c.id === currentChatId);
+            if (!chat || !confirm(`Delete "${chat.title}"?`)) return;
+            chats = chats.filter(c => c.id !== chat.id);
+            go('home');
+            saveAll();
+            toast('Chat deleted');
+            break;
+        }
+
         case 'new-project':
             if (createProject(false) !== null) renderProjects();
             break;
@@ -983,6 +1429,7 @@ mainContent.addEventListener('click', event => {
         case 'open-project':
             setActiveNav(projectsBtn);
             renderProjectDetail(index);
+            renderChatList();
             break;
 
         case 'pin-project':
@@ -1068,6 +1515,9 @@ mainContent.addEventListener('click', event => {
         }
 
         case 'save-settings':
+            apiKey = document.getElementById('set-key').value.trim();
+            store.set('apiKey', apiKey);
+            settings.model = document.getElementById('set-model').value.trim() || DEFAULT_MODEL;
             userName = document.getElementById('set-name').value.trim() || 'Kdn';
             settings.style = document.getElementById('set-style').value;
             settings.instructions = document.getElementById('set-instructions').value;
@@ -1109,18 +1559,12 @@ mainContent.addEventListener('click', event => {
             toast('Design deleted');
             break;
 
-        case 'open-chat': {
-            const item = originalChatOrder.find(chat => chat.dataset.chat === el.dataset.chat);
-            if (item) item.click();
-            break;
-        }
-
         case 'export':
             exportData();
             break;
 
         case 'about':
-            toast(`${ASSISTANT_NAME}: ${projects.length} projects, ${tasks.length} tasks, ${designs.length} designs saved`);
+            toast(`${ASSISTANT_NAME}: ${chats.length} chats, ${projects.length} projects, ${tasks.length} tasks saved`);
             break;
 
         case 'reset':
@@ -1166,420 +1610,8 @@ document.addEventListener('click', (event) => {
     }
 });
 
-/* ===================== scripted conversation playback ===================== */
-
-const ABORT = Symbol('aborted');
-let playToken = 0;
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-function renderInline(text) {
-    return escapeHTML(text)
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-}
-
-function renderMarkdown(md) {
-    const lines = md.split('\n');
-    const blocks = [];
-    let i = 0;
-
-    const isBreak = line =>
-        line.trim() === '' || line.startsWith('```') || line.startsWith('### ') || /^[-*] /.test(line);
-
-    while (i < lines.length) {
-        const line = lines[i];
-
-        if (line.startsWith('```')) {
-            const buffer = [];
-            i++;
-            while (i < lines.length && !lines[i].startsWith('```')) {
-                buffer.push(lines[i]);
-                i++;
-            }
-            i++;
-            blocks.push(`<pre><code>${escapeHTML(buffer.join('\n'))}</code></pre>`);
-        }
-        else if (line.trim() === '') {
-            i++;
-        }
-        else if (line.startsWith('### ')) {
-            blocks.push(`<h3>${renderInline(line.slice(4))}</h3>`);
-            i++;
-        }
-        else if (/^[-*] /.test(line)) {
-            const items = [];
-            while (i < lines.length && /^[-*] /.test(lines[i])) {
-                items.push(`<li>${renderInline(lines[i].slice(2))}</li>`);
-                i++;
-            }
-            blocks.push(`<ul>${items.join('')}</ul>`);
-        }
-        else {
-            const buffer = [];
-            while (i < lines.length && !isBreak(lines[i])) {
-                buffer.push(lines[i]);
-                i++;
-            }
-            blocks.push(`<p>${renderInline(buffer.join(' '))}</p>`);
-        }
-    }
-
-    return blocks.join('');
-}
-
-function guard(state) {
-    if (state.token !== playToken) throw ABORT;
-}
-
-async function wait(ms, state) {
-    let waited = 0;
-    while (waited < ms) {
-        if (state.skip) return;
-        await sleep(Math.min(40, ms - waited));
-        guard(state);
-        waited += 40;
-    }
-}
-
-function place(parent, node, state) {
-    parent.appendChild(node);
-    parent.appendChild(state.caret);
-}
-
-async function streamNode(dest, src, state) {
-    if (src.nodeType === Node.TEXT_NODE) {
-        const full = src.nodeValue;
-        const node = document.createTextNode('');
-        place(dest, node, state);
-
-        let shown = 0;
-        while (shown < full.length && !state.skip) {
-            shown = Math.min(full.length, shown + state.chars);
-            node.nodeValue = full.slice(0, shown);
-            state.scroll();
-            await sleep(18);
-            guard(state);
-        }
-
-        node.nodeValue = full;
-        state.scroll();
-        return;
-    }
-
-    if (src.nodeType !== Node.ELEMENT_NODE) return;
-
-    const el = src.cloneNode(false);
-    place(dest, el, state);
-
-    const previousChars = state.chars;
-    if (el.tagName === 'PRE') state.chars = 7;
-
-    for (const child of Array.from(src.childNodes)) {
-        await streamNode(el, child, state);
-    }
-
-    state.chars = previousChars;
-}
-
-async function typeIntoComposer(text, state) {
-    state.composer.classList.remove('empty');
-    state.composer.textContent = '';
-    state.composer.appendChild(state.caret);
-
-    for (let i = 0; i < text.length; i++) {
-        if (state.skip) break;
-        state.composer.textContent = text.slice(0, i + 1);
-        state.composer.appendChild(state.caret);
-        await sleep(26 + Math.random() * 34);
-        guard(state);
-    }
-
-    state.composer.textContent = text;
-    state.composer.appendChild(state.caret);
-}
-
-function resetComposer(state) {
-    state.caret.remove();
-    state.composer.classList.add('empty');
-    state.composer.textContent = `Reply to ${ASSISTANT_NAME}...`;
-}
-
-/* ---------- file operation cards ---------- */
-
-const TOOL_META = {
-    write: { verb: 'Write', running: 'Writing\u2026' },
-    edit:  { verb: 'Edit',  running: 'Editing\u2026' },
-    bash:  { verb: 'Run',   running: 'Running\u2026' }
-};
-
-const TOOL_ICONS = {
-    write: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9.2 1.6H3.6A1.6 1.6 0 0 0 2 3.2v9.6a1.6 1.6 0 0 0 1.6 1.6h8.8a1.6 1.6 0 0 0 1.6-1.6V6.4z"/>
-                <path d="M9.2 1.6v4.8H14"/>
-            </svg>`,
-    edit:  `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M11.4 2.2 13.8 4.6 6 12.4l-3.1.7.7-3.1z"/>
-                <path d="M10 3.6 12.4 6"/>
-            </svg>`,
-    bash:  `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="3 4.5 6.2 8 3 11.5"/>
-                <line x1="8.2" y1="11.6" x2="13" y2="11.6"/>
-            </svg>`
-};
-
-const PREVIEW_LIMIT = 120;
-const COLLAPSE_ROWS = 14;
-
-function toolRows(part) {
-    const rows = [];
-
-    if (part.type === 'bash') {
-        (part.out || '').split('\n').forEach(line => rows.push({ cls: 'out', text: line }));
-        return rows;
-    }
-
-    if (part.type === 'write') {
-        const lines = (part.code || '').split('\n');
-        lines.slice(0, PREVIEW_LIMIT).forEach(line => rows.push({ cls: 'ctx', text: line }));
-
-        const hidden = (part.lines || lines.length) - Math.min(lines.length, PREVIEW_LIMIT);
-        if (hidden > 0) rows.push({ cls: 'more', text: '\u2026 ' + hidden + ' more lines' });
-        return rows;
-    }
-
-    (part.diff || []).forEach(line => {
-        const mark = line.charAt(0);
-        rows.push({
-            cls: mark === '+' ? 'add' : mark === '-' ? 'del' : 'ctx',
-            text: line
-        });
-    });
-    return rows;
-}
-
-function toolDoneLabel(part) {
-    if (part.type === 'write') {
-        return '<span class="stat add">+' + (part.lines || 0) + '</span> lines';
-    }
-    if (part.type === 'edit') {
-        return '<span class="stat add">+' + (part.add || 0) + '</span>' +
-               '<span class="stat del">\u2212' + (part.del || 0) + '</span>';
-    }
-    return 'Done';
-}
-
-async function playToolPart(body, part, state) {
-    const meta = TOOL_META[part.type];
-    if (!meta) return;
-
-    const card = document.createElement('div');
-    card.className = 'tool-card running ' + part.type;
-    card.innerHTML = `
-        <div class="tool-head">
-            ${TOOL_ICONS[part.type]}
-            <span class="tool-verb">${meta.verb}</span>
-            <span class="tool-file">${escapeHTML(part.file || part.cmd || '')}</span>
-            <span class="tool-status"><span class="tool-dot"></span>${meta.running}</span>
-        </div>
-        <div class="tool-body"></div>
-    `;
-    body.appendChild(card);
-    state.scroll();
-
-    await wait(part.think || 700, state);
-
-    const rows = toolRows(part);
-    const target = card.querySelector('.tool-body');
-    const delay = Math.max(16, Math.min(55, 900 / Math.max(1, rows.length)));
-
-    for (const row of rows) {
-        const line = document.createElement('div');
-        line.className = 'dl ' + row.cls;
-        line.textContent = row.text === '' ? ' ' : row.text;
-        target.appendChild(line);
-        state.scroll();
-
-        if (!state.skip) {
-            await sleep(delay);
-            guard(state);
-        }
-    }
-
-    card.classList.remove('running');
-    card.classList.add('done');
-    card.querySelector('.tool-status').innerHTML = toolDoneLabel(part);
-
-    target.scrollTop = 0;
-
-    if (rows.length > COLLAPSE_ROWS) {
-        const toggle = document.createElement('button');
-        toggle.className = 'tool-more';
-        toggle.textContent = 'Show all ' + rows.length + ' lines';
-
-        toggle.addEventListener('click', event => {
-            event.stopPropagation();
-            const open = card.classList.toggle('expanded');
-            toggle.textContent = open ? 'Show less' : 'Show all ' + rows.length + ' lines';
-        });
-
-        card.appendChild(toggle);
-    }
-
-    state.scroll();
-}
-
-async function playMessage(message, state) {
-    await wait(message.pause || 400, state);
-
-    if (message.role === 'user') {
-        await typeIntoComposer(message.text, state);
-        await wait(320, state);
-        resetComposer(state);
-
-        const bubble = document.createElement('div');
-        bubble.className = 'msg user';
-        bubble.innerHTML = `<div class="msg-body"></div>`;
-        bubble.querySelector('.msg-body').textContent = message.text;
-        state.list.appendChild(bubble);
-        state.scroll();
-        await wait(420, state);
-        return;
-    }
-
-    const wrap = document.createElement('div');
-    wrap.className = 'msg assistant';
-    wrap.innerHTML = `
-        <div class="msg-head">
-            <img src="assets/claude.png" alt="${ASSISTANT_NAME}" width="18" height="18">
-            ${ASSISTANT_NAME}
-        </div>
-        <div class="msg-body"><div class="thinking"><span></span><span></span><span></span></div></div>
-    `;
-    state.list.appendChild(wrap);
-    state.scroll();
-
-    await wait(900, state);
-
-    const body = wrap.querySelector('.msg-body');
-    body.innerHTML = '';
-
-    const parts = message.parts || [{ type: 'text', text: message.text }];
-
-    for (const part of parts) {
-        if (part.type === 'text') {
-            const source = document.createElement('div');
-            source.innerHTML = renderMarkdown(part.text);
-
-            state.chars = part.speed || message.speed || 2;
-            for (const child of Array.from(source.childNodes)) {
-                await streamNode(body, child, state);
-            }
-            state.caret.remove();
-        }
-        else {
-            await playToolPart(body, part, state);
-        }
-    }
-
-    state.caret.remove();
-    state.scroll();
-}
-
-async function playConversation(conversation, state) {
-    try {
-        for (const message of conversation.messages) {
-            await playMessage(message, state);
-        }
-        resetComposer(state);
-        state.scroll();
-        state.hint.textContent = 'End of conversation — hit Replay to watch it again.';
-    }
-    catch (error) {
-        if (error !== ABORT) throw error;
-    }
-}
-
-function openConversation(key) {
-    const conversation = CONVERSATIONS[key];
-    if (!conversation) return;
-
-    resetMain();
-    applyMode('chat');
-    mainContent.classList.add('chat-mode');
-    mainContent.innerHTML = `
-        <div class="chat-view">
-            <div class="chat-topbar">
-                <span>${conversation.title}</span>
-                <button class="replay-btn" id="replay-btn">↻ Replay</button>
-            </div>
-
-            <div class="transcript" id="transcript">
-                <div class="transcript-inner" id="transcript-inner"></div>
-            </div>
-
-            <div class="composer-area">
-                <div class="input-card">
-                    <div class="composer-text empty" id="composer-text">Reply to ${ASSISTANT_NAME}...</div>
-
-                    <div class="input-controls">
-                        <div class="left-controls">
-                            <span class="add-icon">+</span>
-                            <div class="mode-toggle">
-                                <button class="toggle-btn active">Chat</button>
-                                <button class="toggle-btn">Cowork</button>
-                            </div>
-                        </div>
-
-                        <div class="right-controls">
-                            <span>Opus 5 High</span>
-                            <span>∨</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="skip-hint" id="skip-hint">Click anywhere to skip ahead</div>
-            </div>
-        </div>
-    `;
-
-    const transcript = document.getElementById('transcript');
-    const caret = document.createElement('span');
-    caret.className = 'caret';
-
-    const state = {
-        token: playToken,
-        skip: false,
-        chars: 2,
-        caret: caret,
-        list: document.getElementById('transcript-inner'),
-        composer: document.getElementById('composer-text'),
-        hint: document.getElementById('skip-hint'),
-        scroll: () => { transcript.scrollTop = transcript.scrollHeight; }
-    };
-
-    mainContent.querySelector('.chat-view').addEventListener('click', event => {
-        if (event.target.closest('#replay-btn')) return;
-        state.skip = true;
-        state.hint.textContent = '';
-    });
-
-    document.getElementById('replay-btn').addEventListener('click', () => openConversation(key));
-
-    playConversation(conversation, state);
-}
-
-chatItems.forEach(item => {
-    item.addEventListener('click', () => {
-        chatItems.forEach(other => other.classList.remove('active'));
-        item.classList.add('active');
-        setActiveNav(null);
-        openConversation(item.dataset.chat);
-    });
-});
-
 /* ===================== start up ===================== */
 
-document.title = document.title.replace(/Claude/g, ASSISTANT_NAME);
 applyMode('chat');
 setActiveNav(newChatBtn);
 refreshSidebar();
