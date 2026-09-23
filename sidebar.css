@@ -1,0 +1,143 @@
+/* ---------- extra sidebar controls ---------- */
+
+.section-header span:last-child,
+.chats-header .right svg,
+.user-info,
+.menu-buttons svg {
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.section-header span:last-child {
+    padding: 0 5px;
+    font-size: 14px;
+}
+
+.section-header span:last-child:hover,
+.chats-header .right svg:hover,
+.chats-header .right svg.on,
+.menu-buttons svg:hover {
+    background-color: var(--chip-bg);
+}
+
+.chats-header .right {
+    display: flex;
+    gap: 4px;
+}
+
+.user-info {
+    padding: 2px 4px;
+}
+
+.user-info:hover {
+    background-color: var(--chip-bg);
+}
+
+.menu-buttons svg {
+    box-sizing: content-box;
+    padding: 3px;
+}
+
+/* pinned projects under the "Projects" heading */
+
+.pinned-list .nav-item {
+    font-size: 14px;
+}
+
+.pin-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+/* collapsed sidebar */
+
+.sidebar.collapsed {
+    display: none;
+}
+
+.sidebar-open {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    z-index: 50;
+    display: none;
+    padding: 6px;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-main);
+    cursor: pointer;
+}
+
+.sidebar-open.show {
+    display: grid;
+    place-items: center;
+}
+
+.sidebar-open:hover {
+    background: var(--chip-bg);
+}
+
+/* account menu */
+
+.account-menu {
+    position: fixed;
+    z-index: 200;
+    width: 230px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+
+.account-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 10px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.account-head .profile-picture {
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+}
+
+.account-menu button {
+    padding: 8px 10px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    color: var(--text-main);
+    cursor: pointer;
+}
+
+.account-menu button.danger {
+    color: #b3352c;
+}
+
+.account-menu button:hover {
+    background: var(--chip-bg);
+}
+
+/* search results */
+
+.results-label {
+    margin: 16px 0 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.results-label:first-child {
+    margin-top: 0;
+}
