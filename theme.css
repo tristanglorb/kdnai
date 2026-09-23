@@ -1,0 +1,177 @@
+/* ---------- appearance picker (Customize page) ---------- */
+
+.field-label {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.theme-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.theme-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px 8px 8px;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-main);
+    cursor: pointer;
+}
+
+.theme-option:hover {
+    background: var(--chip-bg);
+}
+
+.theme-option.active {
+    border-color: var(--text-main);
+    box-shadow: inset 0 0 0 1px var(--text-main);
+}
+
+.theme-option:focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+}
+
+.theme-swatch {
+    width: 28px;
+    height: 20px;
+    border-radius: 5px;
+    border: 1px solid var(--border-color);
+}
+
+.theme-swatch.light  { background: #FCFCFB; }
+.theme-swatch.dark   { background: #262522; }
+.theme-swatch.system { background: linear-gradient(135deg, #FCFCFB 50%, #262522 50%); }
+
+/* ---------- dark mode ---------- */
+
+html[data-theme="dark"] {
+    color-scheme: dark;
+
+    --bg-main: #262522;
+    --bg-sidebar: #1f1e1c;
+    --border-color: #3b3a36;
+    --border-subtle: #302f2c;
+    --text-main: #ecebe6;
+    --text-muted: #aeaca5;
+    --text-light: #8a8882;
+    --chip-bg: #34332f;
+    --plus-button: #3b3a36;
+}
+
+/* surfaces that were hard-coded white or light grey */
+html[data-theme="dark"] .input-card,
+html[data-theme="dark"] .notice-banner,
+html[data-theme="dark"] .code-container,
+html[data-theme="dark"] .main-menu,
+html[data-theme="dark"] .submenu,
+html[data-theme="dark"] .tool-card,
+html[data-theme="dark"] .page-card,
+html[data-theme="dark"] .row-list,
+html[data-theme="dark"] .ghost-btn,
+html[data-theme="dark"] .page-search,
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .field textarea,
+html[data-theme="dark"] .field select,
+html[data-theme="dark"] .artifact-preview,
+html[data-theme="dark"] .account-menu,
+html[data-theme="dark"] .sidebar-open,
+html[data-theme="dark"] .theme-option {
+    background: #2e2d2a;
+}
+
+html[data-theme="dark"] .toggle-btn.active,
+html[data-theme="dark"] .swap-mode.active {
+    background: #45443f;
+    color: var(--text-main);
+}
+
+html[data-theme="dark"] .swap-mode-menu,
+html[data-theme="dark"] .swap-mode,
+html[data-theme="dark"] .swap-tab-menu {
+    background: #1a1917;
+}
+
+html[data-theme="dark"] .msg.user .msg-body {
+    background: #34332f;
+}
+
+html[data-theme="dark"] .main-menu li:hover,
+html[data-theme="dark"] .row.clickable:hover {
+    background: #3a3935;
+}
+
+html[data-theme="dark"] .main-menu li.divider,
+html[data-theme="dark"] .main-menu li.divider:hover {
+    background: var(--border-color);
+}
+
+html[data-theme="dark"] #claude-txt {
+    color: var(--text-main);
+}
+
+html[data-theme="dark"] .profile-picture {
+    background: #4a4944;
+    color: var(--text-main);
+}
+
+html[data-theme="dark"] .primary-btn {
+    background: var(--text-main);
+    border-color: var(--text-main);
+    color: #1f1e1c;
+}
+
+html[data-theme="dark"] .primary-btn:hover {
+    background: #d6d4cc;
+}
+
+html[data-theme="dark"] .toast {
+    background: var(--text-main);
+    color: #1f1e1c;
+}
+
+html[data-theme="dark"] .send-btn.stop {
+    background: var(--text-main);
+    color: #1f1e1c;
+}
+
+html[data-theme="dark"] .switch {
+    background: #4a4944;
+}
+
+html[data-theme="dark"] .danger,
+html[data-theme="dark"] .topbar-btn.danger,
+html[data-theme="dark"] .account-menu button.danger {
+    color: #e8786d;
+}
+
+html[data-theme="dark"] .msg-error {
+    background: #3b2421;
+    color: #f0a59c;
+}
+
+html[data-theme="dark"] .page-card:hover {
+    border-color: #55534e;
+}
+
+/* sidebar icons were drawn with fixed dark strokes; recolour them */
+html[data-theme="dark"] .sidebar svg [stroke="#4A4A4A"],
+html[data-theme="dark"] #chat-toggle,
+html[data-theme="dark"] #code-toggle {
+    stroke: var(--text-muted);
+}
+
+html[data-theme="dark"] .sidebar svg [fill="#FFFFFF"] {
+    fill: var(--bg-sidebar);
+}
+
+html[data-theme="dark"] .caret {
+    background: var(--text-main);
+}
