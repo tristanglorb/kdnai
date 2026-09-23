@@ -23,7 +23,7 @@ const [downloadIcon, searchIcon, collapseIcon] = document.querySelectorAll('.men
 
 const ASSISTANT_NAME = 'Kayden';
 const DEFAULT_MODEL = 'gpt-5.6-luna';
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const CHAT_URL = '/api/chat';          /* Vercel function that holds OPENAI_API_KEY */
 const DAY = 864e5;
 
 const store = {
@@ -55,14 +55,15 @@ let currentChatId = null;
 let activeRequest = null;        /* { controller } while a reply is streaming */
 
 let userName = store.get('userName', 'Kdn');
-let apiKey = store.get('apiKey', '');
+let appPassword = store.get('appPassword', '');
 
 let settings = Object.assign({
     style: 'Normal',
     instructions: '',
     memory: true,
     suggestions: true,
-    model: DEFAULT_MODEL
+    model: DEFAULT_MODEL,
+    theme: 'system'
 }, store.get('settings', {}));
 
 let chats = store.get('chats', []);
@@ -120,6 +121,22 @@ function saveAll() {
     refreshSidebar();
 }
 
+/* ===================== light / dark theme ===================== */
+
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+function applyTheme() {
+    const dark = settings.theme === 'dark' || (settings.theme === 'system' && darkQuery.matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+}
+
+/* follow the computer's setting live when the theme is "System" */
+darkQuery.addEventListener('change', () => {
+    if (settings.theme === 'system') applyTheme();
+});
+
+applyTheme();
+
 /* ===================== helpers ===================== */
 
 function escapeHTML(text) {
@@ -158,7 +175,6 @@ function toast(message) {
 }
 
 function exportData() {
-    /* the API key is deliberately left out of the export */
     const blob = new Blob(
         [JSON.stringify({ userName, settings, chats, projects, tasks, designs }, null, 2)],
         { type: 'application/json' }
@@ -172,7 +188,7 @@ function exportData() {
 }
 
 function resetAll() {
-    if (!confirm('Reset all chats, projects, tasks, designs and settings? This also removes your saved API key.')) return;
+    if (!confirm('Reset all chats, projects, tasks, designs and settings in this browser?')) return;
     store.clear();
     location.reload();
 }
@@ -411,7 +427,7 @@ const codeHTML = () => `
 
                 <div class="menu-wrapper">
                     <button class="open-menu-button" id="open-github-repos-button">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1a1a1a" stroke-width="0.75" stroke-linecap="round" stroke-linejoin="round">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="0.75" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="8 7 3 12 8 17"/>
                             <line x1="15" y1="3.5" x2="9" y2="20.5"/>
                             <polyline points="16 7 21 12 16 17"/>
@@ -653,6 +669,8 @@ function closeAccountMenu() {
 userInfo.addEventListener('click', () => {
     if (document.getElementById('account-menu')) return closeAccountMenu();
 
+    const dark = document.documentElement.dataset.theme === 'dark';
+
     const menu = document.createElement('div');
     menu.id = 'account-menu';
     menu.className = 'account-menu';
@@ -665,6 +683,7 @@ userInfo.addEventListener('click', () => {
             </div>
         </div>
         <button data-menu="customize">Settings</button>
+        <button data-menu="theme">${dark ? 'Switch to light mode' : 'Switch to dark mode'}</button>
         <button data-menu="search">Search</button>
         <button data-menu="export">Export data</button>
         <button data-menu="reset" class="danger">Reset everything</button>
@@ -683,11 +702,22 @@ userInfo.addEventListener('click', () => {
         const choice = btn.dataset.menu;
         if (choice === 'export') exportData();
         else if (choice === 'reset') resetAll();
+        else if (choice === 'theme') setTheme(dark ? 'light' : 'dark');
         else go(choice);
     });
 });
 
-/* ===================== chatting with OpenAI ===================== */
+function setTheme(theme) {
+    settings.theme = theme;
+    applyTheme();
+    saveAll();
+
+    /* keep the Customize buttons in sync if that page is open */
+    document.querySelectorAll('.theme-option').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.theme === theme));
+}
+
+/* ===================== chatting through /api/chat ===================== */
 
 function openChat(id) {
     const chat = chats.find(c => c.id === id);
@@ -810,11 +840,13 @@ async function describeError(response) {
     } catch {}
 
     switch (response.status) {
-        case 401: return 'OpenAI rejected your API key (401). Check the key in Customize.';
-        case 403: return 'Your API key is not allowed to use this model (403). ' + detail;
-        case 404: return `The model "${settings.model}" was not found (404). Change the model in Customize.`;
+        case 401: return (detail || 'Not authorized.') + ' (401) Check the app password in Customize, or OPENAI_API_KEY in Vercel.';
+        case 403: return 'Your OpenAI key is not allowed to use this model (403). ' + detail;
+        case 404: return detail
+            ? `${detail} (404) Check the model name in Customize.`
+            : 'The chat server was not found (404). Run the app on Vercel or with "vercel dev", not by opening index.html directly.';
         case 429: return 'Rate limit reached or no credits left (429). Check your usage and billing on the OpenAI platform.';
-        default:  return `OpenAI error ${response.status}${detail ? ': ' + detail : ''}`;
+        default:  return `Server error ${response.status}${detail ? ': ' + detail : ''}`;
     }
 }
 
@@ -858,19 +890,14 @@ async function streamReply(chat, reply, body) {
     setSendState();
 
     try {
-        if (!apiKey) {
-            throw new Error(`Add your OpenAI API key in Customize to start chatting with ${ASSISTANT_NAME}.`);
-        }
+        const headers = { 'Content-Type': 'application/json' };
+        if (appPassword) headers['x-app-password'] = appPassword;
 
-        const response = await fetch(OPENAI_URL, {
+        const response = await fetch(CHAT_URL, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + apiKey
-            },
+            headers,
             body: JSON.stringify({
                 model: settings.model,
-                stream: true,
                 messages: buildMessages(chat)
             }),
             signal: controller.signal
@@ -917,7 +944,7 @@ async function streamReply(chat, reply, body) {
         }
         else if (error instanceof TypeError) {
             reply.error = true;
-            reply.content = "Couldn't reach OpenAI. Check your internet connection and try again.";
+            reply.content = "Couldn't reach the server. Check your internet connection and try again.";
         }
         else {
             reply.error = true;
@@ -1103,6 +1130,7 @@ function renderScheduled() {
 
 function renderCustomize() {
     const styles = ['Normal', 'Concise', 'Explanatory', 'Formal'];
+    const themes = [['light', 'Light'], ['dark', 'Dark'], ['system', 'System']];
 
     showPage(`
         <div class="page">
@@ -1111,9 +1139,22 @@ function renderCustomize() {
             </div>
             <div class="form">
                 <div class="field">
-                    <label for="set-key">OpenAI API key</label>
-                    <span class="field-hint">Saved only in this browser. Never put your key in the code or push it to GitHub.</span>
-                    <input id="set-key" type="password" value="${escapeHTML(apiKey)}" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                    <span class="field-label">Appearance</span>
+                    <span class="field-hint">System follows your computer's light or dark setting.</span>
+                    <div class="theme-options" role="group" aria-label="Appearance">
+                        ${themes.map(([value, label]) => `
+                            <button class="theme-option ${settings.theme === value ? 'active' : ''}"
+                                    data-action="set-theme" data-theme="${value}">
+                                <span class="theme-swatch ${value}"></span>
+                                ${label}
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="set-password">App password</label>
+                    <span class="field-hint">Only needed if you set APP_PASSWORD in Vercel. Saved only in this browser.</span>
+                    <input id="set-password" type="password" value="${escapeHTML(appPassword)}" autocomplete="off" spellcheck="false">
                 </div>
                 <div class="field">
                     <label for="set-model">Model</label>
@@ -1171,7 +1212,7 @@ function renderMore() {
                 <div class="row clickable" data-action="nav" data-view="customize">
                     <div class="row-main">
                         <span class="row-title">Settings</span>
-                        <span class="row-sub">API key, model, name and instructions</span>
+                        <span class="row-sub">Appearance, model, name and instructions</span>
                     </div>
                 </div>
                 <div class="row clickable" data-action="export">
@@ -1189,7 +1230,7 @@ function renderMore() {
                 <div class="row clickable" data-action="reset">
                     <div class="row-main">
                         <span class="row-title danger">Reset everything</span>
-                        <span class="row-sub">Clear all chats, projects, tasks, settings and your API key</span>
+                        <span class="row-sub">Clear all chats, projects, tasks and settings in this browser</span>
                     </div>
                 </div>
             </div>
@@ -1396,6 +1437,10 @@ mainContent.addEventListener('click', event => {
             go(el.dataset.view);
             break;
 
+        case 'set-theme':
+            setTheme(el.dataset.theme);
+            break;
+
         case 'open-chat':
             openChat(el.dataset.chat);
             break;
@@ -1515,8 +1560,8 @@ mainContent.addEventListener('click', event => {
         }
 
         case 'save-settings':
-            apiKey = document.getElementById('set-key').value.trim();
-            store.set('apiKey', apiKey);
+            appPassword = document.getElementById('set-password').value.trim();
+            store.set('appPassword', appPassword);
             settings.model = document.getElementById('set-model').value.trim() || DEFAULT_MODEL;
             userName = document.getElementById('set-name').value.trim() || 'Kdn';
             settings.style = document.getElementById('set-style').value;
