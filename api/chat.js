@@ -3,7 +3,7 @@
 // never reaches the browser. Streams OpenAI's reply straight back.
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-const DEFAULT_MODEL = 'gpt-5.6-luna';
+const DEFAULT_MODEL = 'gpt-6-astra';
 
 function errorResponse(status, message) {
     return new Response(JSON.stringify({ error: { message } }), {
