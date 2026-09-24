@@ -22,7 +22,13 @@ const [downloadIcon, searchIcon, collapseIcon] = document.querySelectorAll('.men
 /* ===================== names & saved state ===================== */
 
 const ASSISTANT_NAME = 'Kayden';
-const DEFAULT_MODEL = 'gpt-5.6-luna';
+const DEFAULT_MODEL = 'gpt-6-astra';
+
+const MODEL_OPTIONS = [
+    ['gpt-6-astra',  'GPT-6 Astra: most capable, slower, most expensive'],
+    ['gpt-5.6-sol',  'GPT-5.6 Sol: strong all-rounder, cheaper'],
+    ['gpt-5.6-luna', 'GPT-5.6 Luna: fastest and cheapest']
+];
 const CHAT_URL = '/api/chat';          /* Vercel function that holds OPENAI_API_KEY */
 const DAY = 864e5;
 
@@ -65,6 +71,13 @@ let settings = Object.assign({
     model: DEFAULT_MODEL,
     theme: 'system'
 }, store.get('settings', {}));
+
+/* one-time switch from the old default model to the new one */
+if (!store.get('modelUpgraded', false)) {
+    if (settings.model === 'gpt-5.6-luna') settings.model = DEFAULT_MODEL;
+    store.set('settings', settings);
+    store.set('modelUpgraded', true);
+}
 
 let chats = store.get('chats', []);
 
@@ -1158,8 +1171,13 @@ function renderCustomize() {
                 </div>
                 <div class="field">
                     <label for="set-model">Model</label>
-                    <span class="field-hint">The OpenAI model ${ASSISTANT_NAME} uses, for example ${DEFAULT_MODEL}.</span>
-                    <input id="set-model" value="${escapeHTML(settings.model)}" spellcheck="false">
+                    <span class="field-hint">The OpenAI model ${ASSISTANT_NAME} uses. Stronger models cost more per message.</span>
+                    <select id="set-model">
+                        ${MODEL_OPTIONS
+                            .concat(MODEL_OPTIONS.some(([id]) => id === settings.model) ? [] : [[settings.model, settings.model]])
+                            .map(([id, label]) => `<option value="${escapeHTML(id)}" ${id === settings.model ? 'selected' : ''}>${escapeHTML(label)}</option>`)
+                            .join('')}
+                    </select>
                 </div>
                 <div class="field">
                     <label for="set-name">What should ${ASSISTANT_NAME} call you?</label>
